@@ -1,0 +1,99 @@
+joints_renderer:
+  _target_: src.renderer.matplotlib.MatplotlibRender
+  jointstype: "guoh3djoints"
+  fps: 20.0
+  colors: ['black', 'magenta', 'red', 'green', 'blue']
+  figsize: 4
+  canonicalize: true
+  radius: 4.0
+  fontsize: 10
+
+smpl_renderer:
+  _target_: src.renderer.humor.HumorRenderer
+  fps: 20.0
+  imw: 720
+  imh: 720
+
+diffusion:
+  weight: 1.0
+  mcd: True
+
+  denoiser:
+    dropout: 0.0
+
+# Pretrained model parameters
+ckpt_name: 'logs/checkpoints/last.ckpt'
+dataset: humanml3d # kitml
+run_dir: pretrained_models/mdm-smpl_clip_smplrifke_humanml3d
+input_type: auto # timeline / text
+single_frame: false # render or not summary frame with smpl
+gender: male
+
+guidance_weight: 1.0
+baseline: none
+
+overlap_s: 0.5
+ckpt: last
+value_from: smpl
+
+
+# General parameters
+num_gen_per_prompt: 2 # 4
+num_prompts_dataset: 16 # 32
+num_workers: 6
+
+# Training parameters
+iterations: 3000 #10000
+train_epochs: 3 #4
+train_batch_size: 14
+grad_clip: 1.0
+advantage_clip_epsilon: 1e-4
+
+# Reward Model
+reward: "TMR"
+
+masking_ratio: 0.75
+reward_scale: 10
+
+# Sequence parameters
+sequence_fixed: false
+fps: 20
+time: 2.5
+joint_stype: "both"  # Can be either "both" or "smpljoints"
+
+# Optimizer parameters
+lr: 1e-5
+beta1: 0.9
+beta2: 0.999
+eps: 1e-8
+weight_decay: 1e-4
+
+# Loss parameters
+betaL: 0
+alphaL: 1
+
+# Validation/Test parameters
+val_iter: 25
+val_batch_size: 512
+val_num_batch: 0
+render_videos: false
+
+dataset_name: ''
+
+#Layer freeze
+freeze_normalization_layers: true
+
+#LorA
+lora: false
+lora_rank: 4
+lora_alpha: 16
+lora_dropout: 0.1
+lora_bias: "none"
+
+# WanDB parameters
+experiment_name: 'New_'
+group_name: ''
+
+
+tmr_plus_plus: true
+
