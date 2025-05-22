@@ -41,9 +41,9 @@ class RLDataset(Dataset):
         """
         self.dataset = dataset_dict
         # Verify all tensors have the same first dimension
-        lengths = [v.size(0) for v in self.dataset.values()]
-        assert all(length == lengths[0] for length in lengths), "All tensors must have the same first dimension size"
-        self.length = lengths[0]
+        # lengths = [v.size(0) for v in self.dataset.values()]
+        #assert all(length == lengths[0] for length in lengths), "All tensors must have the same first dimension size"
+        self.length = self.dataset["xt"].shape[0]
 
     def __len__(self):
         return self.length
@@ -53,14 +53,15 @@ class RLDataset(Dataset):
         return {key: tensor[idx] for key, tensor in self.dataset.items()}
 
 
-def render(x_starts, infos, smplh, joints_renderer, smpl_renderer, texts, file_path, ty_log, out_formats, video_log=False):
+def render(x_starts, infos, smplh, joints_renderer, smpl_renderer, texts, file_path, ty_log, out_formats,
+           video_log=False):
     # out_formats = ['txt', 'smpl', 'joints', 'txt', 'smpl', 'videojoints', 'videosmpl']
     tmp = file_path
 
     for idx, (x_start, length, text) in enumerate(zip(x_starts, infos["all_lengths"], texts)):
 
         if idx == 16:
-            break #todo codice brutto
+            break  # todo codice brutto
 
         x_start = x_start[:length]
 
@@ -78,7 +79,6 @@ def render(x_starts, infos, smplh, joints_renderer, smpl_renderer, texts, file_p
             joints_renderer(extracted_output["joints"], title=render_text, output=video_path, canonicalize=False)
             if video_log:
                 wandb.log({ty_log: {"Video-joints": wandb.Video(video_path, format="gif", caption=text)}})
-
 
 
 def preload_tmr_text(dataloader):
@@ -106,6 +106,7 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
         "mask": [],
         "length": [],
         "enc_text": [],
+        "caption": [],
     }
 
     generate_bar = tqdm(enumerate(itertools.islice(itertools.cycle(train_dataloader), 1)),
@@ -123,7 +124,8 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
         mask = length_to_mask(motion_lens.to(device), device=device)
 
         with torch.no_grad():
-            animations, results_by_timestep = model.generate_batch_rl(texts, torch.LongTensor([int(x) for x in motion_lens]))  # TODO Check feet bs
+            animations, results_by_timestep = model.generate_batch_rl(texts, torch.LongTensor(
+                [int(x) for x in motion_lens]))  # TODO Check feet bs
 
         animations = masked(animations, mask)
 
@@ -169,6 +171,7 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
         all_mask = []
         all_lengths = []
         all_enc_text = []
+        all_caption = []
 
         for t in timesteps:
             experiment = results_by_timestep[t]
@@ -188,6 +191,7 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
             all_mask.append(experiment["mask"])
             all_lengths.append(experiment["length"])
             all_enc_text.append(experiment["enc_text"])
+            all_caption.append(experiment["caption"])
 
         # Concatenate all the results for this batch
         dataset["r"].append(torch.cat(all_rewards, dim=0).view(diff_step, batch_size).T.clone())
@@ -201,11 +205,15 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
         # y
         dataset["mask"].append(torch.cat(all_mask, dim=0).view(diff_step, batch_size, seq_len).permute(1, 0, 2))
         dataset["length"].append(torch.cat(all_lengths, dim=0).view(diff_step, batch_size).T)
-        dataset["enc_text"].append(torch.cat(all_enc_text, dim=0).view(diff_step, batch_size, 77, 256).permute(1, 0, 2, 3))
+        dataset["caption"] = all_caption[0]#[[fsk for _ in range(diff_step)] for fsk in all_caption[0]]
+        dataset["enc_text"].append(
+            torch.cat(all_enc_text, dim=0).view(diff_step, batch_size, 77, 256).permute(1, 0, 2, 3))
 
     for key in dataset:
-        dataset[key] = torch.cat(dataset[key], dim=0)
-
+        try:
+            dataset[key] = torch.cat(dataset[key], dim=0)
+        except:
+            print(key)
     return dataset
 
 
@@ -227,6 +235,7 @@ def prepare_dataset(dataset):
     shuffle_indices = torch.randperm(dataset_size)
 
     for key in dataset:
+
         dataset[key] = dataset[key][shuffle_indices]
 
     return dataset
@@ -255,7 +264,6 @@ def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, o
     my_dataset = RLDataset(dataset)
     dataloader = DataLoader(my_dataset, batch_size=c.train_batch_size, shuffle=True, drop_last=False)
 
-
     model, optimizer, training_dataloader, _ = accelerator.prepare(
         model, optimizer, dataloader, None)
 
@@ -267,23 +275,23 @@ def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, o
         epoch_clipped_elements = 0
         epoch_total_elements = 0
 
-        minibatch_bar = tqdm(dataloader, leave=False, desc="Minibatch")
-        dataset = prepare_dataset(dataset)
+        minibatch_bar = tqdm(training_dataloader, leave=False, desc="Minibatch")
+        # dataset = prepare_dataset(dataset)
 
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(minibatch_bar):
             optimizer.zero_grad()
 
-
-            advantage = batch["advantage"] #.to(device)
-            enc_text = batch["enc_text"] #.to(device)
-            mask = batch["mask"]  #.to(device)
-            lengths = batch["length"] #.to(device)
-            xt_1 = batch["xt_1"]  #.to(device)
-            xt = batch["xt"]  #.to(device)
-            log_like = batch["log_like"]  #.to(device)
+            advantage = batch["advantage"]  # .to(device)
+            enc_text = batch["enc_text"]  # .to(device)
+            caption = batch["caption"]  # .to(device)
+            mask = batch["mask"]  # .to(device)
+            lengths = batch["length"]  # .to(device)
+            xt_1 = batch["xt_1"]  # .to(device)
+            xt = batch["xt"]  # .to(device)
+            log_like = batch["log_like"]  # .to(device)
             with accelerator.autocast():
-                new_log_like = model.get_loglike_aa(enc_text[:, 0], lengths, xt_1, mask[:, 0], xt)  # TODO Check feet bs
+                new_log_like = model.get_loglike_aa(caption, lengths, xt_1, mask[:, 0], xt)  # TODO Check feet bs
 
                 ratio = torch.exp(new_log_like - log_like)
                 # torch.set_printoptions(precision=4)
@@ -311,7 +319,6 @@ def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, o
             tot_loss += combined_loss.item()
             tot_policy_loss += policy_loss.item()
 
-
             grad_norm = torch.sqrt(sum(p.grad.norm() ** 2 for p in model.model.parameters() if p.grad is not None))
             wandb.log({"Train": {"Gradient Norm": grad_norm.item(),
                                  "real_step": (iteration * c.train_epochs + e) * num_minibatches + (
@@ -319,7 +326,6 @@ def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, o
 
             torch.nn.utils.clip_grad_norm_(model.model.parameters(), c.grad_clip)
             optimizer.step()
-
 
             minibatch_bar.set_postfix(batch_loss=f"{combined_loss.item():.4f}")
 
@@ -381,7 +387,8 @@ def test(model, dataloader, device, infos, text_model, smplh, joints_renderer, s
         metrics = all_metrics(animations, infos, smplh, texts, c)
         if batch_idx == 0:
             norm_animations = get_motion_guofeats(animations, infos)
-            render(norm_animations, infos, smplh, joints_renderer, smpl_renderer, texts, tmp_path, ty_log, out_formats, video_log=True)
+            render(norm_animations, infos, smplh, joints_renderer, smpl_renderer, texts, tmp_path, ty_log, out_formats,
+                   video_log=True)
 
         has_nan = (
                 any(torch.isnan(t.cpu()).any() for t in metrics_reward.values())
@@ -435,7 +442,7 @@ def main(c: DictConfig):
 
     wandb.init(
         project="TM-BM",
-        name="ROBA A CASO",
+        name="ROBA A CASO in FP16",
         config=config_dict,
         group="StableMoFusionRL"
     )
@@ -443,7 +450,7 @@ def main(c: DictConfig):
     create_folder_results("ResultRL")
     create_folder_results("RL_Model")
 
-    accelerator = Accelerator()
+    accelerator = Accelerator() #mixed_precision="fp16"
 
     device = accelerator.device
 
@@ -551,7 +558,8 @@ def main(c: DictConfig):
 
         train_datasets_rl = generate(diffusion_rl, train_dataloader, iteration, c, device, infos, text_model, smplh,
                                      None)  # , generation_iter
-        train(diffusion_rl, optimizer, train_datasets_rl, iteration, c, infos, device, old_model=None)
+        train(diffusion_rl, optimizer, train_datasets_rl, iteration, c, infos, device, accelerator=accelerator,
+              old_model=None)
 
         if (iteration + 1) % c.val_iter == 0:
             avg_reward, avg_tmr, avg_tmr_plus_plus, avg_guo = test(diffusion_rl, val_dataloader, device, infos,

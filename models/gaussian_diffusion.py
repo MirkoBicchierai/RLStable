@@ -222,44 +222,47 @@ class DiffusePipeline(object):
                 "length": m_lens.detach().cpu(),
                 "mask": mask.detach().cpu(),
                 "enc_text": enc_text,
+                "caption": caption,
 
             }
 
         return sample, results
 
-    # def get_loglike(self, enc_text, m_lens, actions, mask, state):
-    #     B = enc_text.shape[0]
-    #     T = m_lens.max()
-    #     shape = (B, T, self.model.input_feats)
-    #
-    #     # set timesteps
-    #     self.scheduler.set_timesteps(self.num_inference_steps, self.device)
-    #     timesteps = [torch.tensor([t] * B, device=self.device).long() for t in self.scheduler.timesteps]
-    #     log_prob = []
-    #     for i, t in enumerate(timesteps):
-    #         sample = state[:, i]
-    #         # 1. model predict
-    #         if getattr(self.model, 'cond_mask_prob', 0) > 0:
-    #             predict = self.model.forward_with_cfg(sample, t, enc_text=enc_text)
-    #         else:
-    #             predict = self.model(sample, t, enc_text=enc_text)
-    #
-    #         old_sample = sample.clone()
-    #
-    #         # 2. compute less noisy motion and set x_t -> x_t-1
-    #         sus = self.scheduler.step(predict, t[0], sample, action=actions[:, i])
-    #
-    #         sample = sus.prev_sample
-    #
-    #         # log_likelihood = compute_log_likelihood(sample, mean, std)
-    #         log_likelihood = nan_masked(sus.log_prob, mask)
-    #         log_prob_ = log_likelihood.nanmean(dim=[1, 2])
-    #         log_prob.append(log_prob_.unsqueeze(-1))
-    #         # log_prob.append(log_likelihood.nanmean(dim=[1, 2]).unsqueeze(-1))
-    #
-    #     return torch.cat(log_prob, dim=1)
+    def get_loglike(self, enc_text, m_lens, actions, mask, state):
+        B = enc_text.shape[0]
+        T = m_lens.max()
+        shape = (B, T, self.model.input_feats)
 
-    def get_loglike_aa(self, enc_text, m_lens, actions, mask, state):
+        # set timesteps
+        self.scheduler.set_timesteps(self.num_inference_steps, self.device)
+        timesteps = [torch.tensor([t] * B, device=self.device).long() for t in self.scheduler.timesteps]
+        log_prob = []
+        for i, t in enumerate(timesteps):
+            sample = state[:, i]
+            # 1. model predict
+            if getattr(self.model, 'cond_mask_prob', 0) > 0:
+                predict = self.model.forward_with_cfg(sample, t, enc_text=enc_text)
+            else:
+                predict = self.model(sample, t, enc_text=enc_text)
+
+            old_sample = sample.clone()
+
+            # 2. compute less noisy motion and set x_t -> x_t-1
+            sus = self.scheduler.step(predict, t[0], sample, action=actions[:, i])
+
+            sample = sus.prev_sample
+
+            # log_likelihood = compute_log_likelihood(sample, mean, std)
+            log_likelihood = nan_masked(sus.log_prob, mask)
+            log_prob_ = log_likelihood.nanmean(dim=[1, 2])
+            log_prob.append(log_prob_.unsqueeze(-1))
+            # log_prob.append(log_likelihood.nanmean(dim=[1, 2]).unsqueeze(-1))
+
+        return torch.cat(log_prob, dim=1)
+
+    def get_loglike_aa(self, caption, m_lens, actions, mask, state):
+
+        enc_text = self.model.encode_text(caption, self.device)
         B = enc_text.shape[0]
 
         T = m_lens.max()
@@ -270,6 +273,8 @@ class DiffusePipeline(object):
         timesteps = timesteps.unsqueeze(0).repeat(B, 1)  # shape (B, self.num_inference_steps)
 
         enc_text = enc_text.unsqueeze(1).repeat(1, self.num_inference_steps, 1, 1)
+
+
 
         timesteps = timesteps.reshape(B * self.num_inference_steps)
         enc_text = enc_text.reshape(B * self.num_inference_steps, enc_text.shape[-2], enc_text.shape[-1])
