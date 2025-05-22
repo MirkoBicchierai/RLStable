@@ -209,18 +209,18 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
     return dataset
 
 
-def get_batch(dataset, i, minibatch_size, infos, diff_step, device):
-    enc_text = dataset["enc_text"][i: i + minibatch_size].to(device)
-    mask = dataset["mask"][i: i + minibatch_size].to(device)
-    lengths = dataset["length"][i: i + minibatch_size].to(device)
-    r = dataset["r"][i: i + minibatch_size].to(device)
-    xt_1 = dataset["xt_1"][i: i + minibatch_size].to(device)
-    xt = dataset["xt"][i: i + minibatch_size].to(device)
-    t = dataset["t"][i: i + minibatch_size].to(device)
-    log_like = dataset["log_like"][i: i + minibatch_size].to(device)
-
-    return enc_text, mask, lengths, r, xt_1, xt, t, log_like
-
+# def get_batch(dataset, i, minibatch_size, infos, diff_step, device):
+#     enc_text = dataset["enc_text"][i: i + minibatch_size].to(device)
+#     mask = dataset["mask"][i: i + minibatch_size].to(device)
+#     lengths = dataset["length"][i: i + minibatch_size].to(device)
+#     r = dataset["r"][i: i + minibatch_size].to(device)
+#     xt_1 = dataset["xt_1"][i: i + minibatch_size].to(device)
+#     xt = dataset["xt"][i: i + minibatch_size].to(device)
+#     t = dataset["t"][i: i + minibatch_size].to(device)
+#     log_like = dataset["log_like"][i: i + minibatch_size].to(device)
+#
+#     return enc_text, mask, lengths, r, xt_1, xt, t, log_like
+#
 
 def prepare_dataset(dataset):
     dataset_size = dataset["r"].shape[0]
@@ -232,7 +232,7 @@ def prepare_dataset(dataset):
     return dataset
 
 
-def train(model, optimizer, dataset, iteration, c, infos, device, old_model=None):
+def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, old_model=None):
     model.model.unet.train()
     model.model.textTransEncoder.train()
     model.model.embed_text.train()
@@ -255,7 +255,7 @@ def train(model, optimizer, dataset, iteration, c, infos, device, old_model=None
     my_dataset = RLDataset(dataset)
     dataloader = DataLoader(my_dataset, batch_size=c.train_batch_size, shuffle=True, drop_last=False)
 
-    accelerator = Accelerator()
+
     model, optimizer, training_dataloader, _ = accelerator.prepare(
         model, optimizer, dataloader, None)
 
@@ -269,68 +269,57 @@ def train(model, optimizer, dataset, iteration, c, infos, device, old_model=None
 
         minibatch_bar = tqdm(dataloader, leave=False, desc="Minibatch")
         dataset = prepare_dataset(dataset)
-        mb_counter = 0
+
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(minibatch_bar):
+            optimizer.zero_grad()
 
-            # with torch.autocast(device_type="cuda"):
-            advantage = batch["advantage"].to(device)
-            real_batch_size = advantage.shape[0]
-            # enc_text, mask, lengths, r, xt_1, xt, t, log_like = get_batch(dataset, batch_idx, real_batch_size, infos, diff_step, device)
 
-            enc_text = batch["enc_text"].to(device)
-            mask = batch["mask"].to(device)
-            lengths = batch["length"].to(device)
-            xt_1 = batch["xt_1"].to(device)
-            xt = batch["xt"].to(device)
-            log_like = batch["log_like"].to(device)
+            advantage = batch["advantage"] #.to(device)
+            enc_text = batch["enc_text"] #.to(device)
+            mask = batch["mask"]  #.to(device)
+            lengths = batch["length"] #.to(device)
+            xt_1 = batch["xt_1"]  #.to(device)
+            xt = batch["xt"]  #.to(device)
+            log_like = batch["log_like"]  #.to(device)
+            with accelerator.autocast():
+                new_log_like = model.get_loglike_aa(enc_text[:, 0], lengths, xt_1, mask[:, 0], xt)  # TODO Check feet bs
 
-            new_log_like = model.get_loglike_aa(enc_text[:, 0], lengths, xt_1, mask[:, 0], xt)  # TODO Check feet bs
+                ratio = torch.exp(new_log_like - log_like)
+                # torch.set_printoptions(precision=4)
 
-            ratio = torch.exp(new_log_like - log_like)
-            # torch.set_printoptions(precision=4)
+                real_adv = advantage[:, -1:]  # r[:,-1:]/10
 
-            real_adv = advantage[:, -1:]  # r[:,-1:]/10
+                # Count how many elements need clipping
+                lower_bound = 1.0 - c.advantage_clip_epsilon
+                upper_bound = 1.0 + c.advantage_clip_epsilon
 
-            # Count how many elements need clipping
-            lower_bound = 1.0 - c.advantage_clip_epsilon
-            upper_bound = 1.0 + c.advantage_clip_epsilon
+                too_small = (ratio < lower_bound).sum().item()
+                too_large = (ratio > upper_bound).sum().item()
+                current_clipped = too_small + too_large
+                epoch_clipped_elements += current_clipped
+                current_total = ratio.numel()
+                epoch_total_elements += current_total
 
-            too_small = (ratio < lower_bound).sum().item()
-            too_large = (ratio > upper_bound).sum().item()
-            current_clipped = too_small + too_large
-            epoch_clipped_elements += current_clipped
-            current_total = ratio.numel()
-            epoch_total_elements += current_total
+                clip_adv = torch.clamp(ratio, lower_bound, upper_bound) * real_adv
+                policy_loss = -torch.min(ratio * real_adv, clip_adv).sum(1).mean()
 
-            clip_adv = torch.clamp(ratio, lower_bound, upper_bound) * real_adv
-            policy_loss = -torch.min(ratio * real_adv, clip_adv).sum(1).mean()
-
-            # print(current_clipped/current_total)
-
-            # if c.betaL > 0:
-            #     combined_loss = c.alphaL * policy_loss + c.betaL * kl_div
-            #     tot_kl += kl_div.item()
-            # else:
-            #     combined_loss = c.alphaL * policy_loss
-            combined_loss = c.alphaL * policy_loss
+                combined_loss = c.alphaL * policy_loss
 
             # combined_loss.backward()
             accelerator.backward(combined_loss)
             tot_loss += combined_loss.item()
             tot_policy_loss += policy_loss.item()
-            mb_counter += 1
 
-            if mb_counter == 1:
-                mb_counter = 0
-                grad_norm = torch.sqrt(sum(p.grad.norm() ** 2 for p in model.model.parameters() if p.grad is not None))
-                wandb.log({"Train": {"Gradient Norm": grad_norm.item(),
-                                     "real_step": (iteration * c.train_epochs + e) * num_minibatches + (
-                                             batch_idx // c.train_batch_size)}})
 
-                torch.nn.utils.clip_grad_norm_(model.model.parameters(), c.grad_clip)
-                optimizer.step()
-                optimizer.zero_grad()
+            grad_norm = torch.sqrt(sum(p.grad.norm() ** 2 for p in model.model.parameters() if p.grad is not None))
+            wandb.log({"Train": {"Gradient Norm": grad_norm.item(),
+                                 "real_step": (iteration * c.train_epochs + e) * num_minibatches + (
+                                         batch_idx // c.train_batch_size)}})
+
+            torch.nn.utils.clip_grad_norm_(model.model.parameters(), c.grad_clip)
+            optimizer.step()
+
 
             minibatch_bar.set_postfix(batch_loss=f"{combined_loss.item():.4f}")
 
@@ -444,16 +433,19 @@ def main(c: DictConfig):
     config_dict = OmegaConf.to_container(c, resolve=True)
     wandb.login(key="686f740320175b422861147930c51baba0e47fe6")
 
-
-
     wandb.init(
         project="TM-BM",
-        name="stillness_guidance_crazy_easiest_32",
+        name="ROBA A CASO",
         config=config_dict,
         group="StableMoFusionRL"
     )
 
     create_folder_results("ResultRL")
+    create_folder_results("RL_Model")
+
+    accelerator = Accelerator()
+
+    device = accelerator.device
 
     # ckpt_path = os.path.join(c.run_dir, c.ckpt_name)
     # print("Loading the checkpoint")
@@ -467,8 +459,6 @@ def main(c: DictConfig):
     opt = parser.parse()
 
     set_seed(opt.seed)
-    device_id = 0
-    device = torch.device('cuda:%d' % device_id if torch.cuda.is_available() else 'cpu')
     opt.device = device
 
     print("Loading the models")
@@ -487,29 +477,29 @@ def main(c: DictConfig):
     )
 
     diffusion_rl.model.cond_mask_prob = 0.0  # todo remvoe
-
-    for p in diffusion_rl.model.parameters():
-        p.requires_grad = False
+    #
+    # for p in diffusion_rl.model.parameters():
+    #     p.requires_grad = False
 
     freeze_normalization_layers(diffusion_rl)
 
-    lora_config = LoraConfig(
-        # task_type=TaskType.UNET,  # we’re adapting a diffusion UNet
-        inference_mode=False,  # fine-tuning, not just inference
-        r=8,  # LoRA rank
-        lora_alpha=16,  # LoRA scaling
-        lora_dropout=0.0,  # dropout on LoRA layers
-        bias="none",  # no bias adapters
-        # target all the cross-attention Q/K/V projections
-        target_modules=["query", "key", "value", "embed_text"
-                                                 "textTransEncoder.layers.0.self_attn.out_proj",
-                        "textTransEncoder.layers.1.self_attn.out_proj",
-                        "textTransEncoder.layers.2.self_attn.out_proj",
-                        "textTransEncoder.layers.3.self_attn.out_proj",
-                        ],
-    )
-
-    diffusion_rl.model.unet = get_peft_model(diffusion_rl.model.unet, lora_config)
+    # lora_config = LoraConfig(
+    #     # task_type=TaskType.UNET,  # we’re adapting a diffusion UNet
+    #     inference_mode=False,  # fine-tuning, not just inference
+    #     r=8,  # LoRA rank
+    #     lora_alpha=16,  # LoRA scaling
+    #     lora_dropout=0.0,  # dropout on LoRA layers
+    #     bias="none",  # no bias adapters
+    #     # target all the cross-attention Q/K/V projections
+    #     target_modules=["query", "key", "value", "embed_text"
+    #                     "textTransEncoder.layers.0.self_attn.out_proj",
+    #                     "textTransEncoder.layers.1.self_attn.out_proj",
+    #                     "textTransEncoder.layers.2.self_attn.out_proj",
+    #                     "textTransEncoder.layers.3.self_attn.out_proj",
+    #                     ],
+    # )
+    #
+    # diffusion_rl.model.unet = get_peft_model(diffusion_rl.model.unet, lora_config)
 
     total_trainable_params = sum(p.numel() for p in diffusion_rl.model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {total_trainable_params:,}")
