@@ -213,7 +213,7 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
         try:
             dataset[key] = torch.cat(dataset[key], dim=0)
         except:
-            print(key)
+            pass
     return dataset
 
 
@@ -241,7 +241,7 @@ def prepare_dataset(dataset):
     return dataset
 
 
-def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, old_model=None):
+def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, training_dataloader, old_model=None):
     model.model.unet.train()
     model.model.textTransEncoder.train()
     model.model.embed_text.train()
@@ -261,11 +261,8 @@ def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, o
 
     diff_step = dataset["xt_1"][0].shape[0]
 
-    my_dataset = RLDataset(dataset)
-    dataloader = DataLoader(my_dataset, batch_size=c.train_batch_size, shuffle=True, drop_last=False)
-
-    model, optimizer, training_dataloader, _ = accelerator.prepare(
-        model, optimizer, dataloader, None)
+    training_dataloader.base_dataloader.dataset.dataset = dataset
+    training_dataloader.base_dataloader.dataset.length = dataset["xt"].shape[0]
 
     train_bar = tqdm(range(c.train_epochs), desc=f"Iteration {iteration + 1}/{c.iterations} [Train]", leave=False)
     for e in train_bar:
@@ -494,7 +491,7 @@ def main(c: DictConfig):
     #     # task_type=TaskType.UNET,  # we’re adapting a diffusion UNet
     #     inference_mode=False,  # fine-tuning, not just inference
     #     r=8,  # LoRA rank
-    #     lora_alpha=16,  # LoRA scaling
+    #     lora_alpha=16,  # LoRA scalingde
     #     lora_dropout=0.0,  # dropout on LoRA layers
     #     bias="none",  # no bias adapters
     #     # target all the cross-attention Q/K/V projections
@@ -553,13 +550,21 @@ def main(c: DictConfig):
 
     iter_bar = tqdm(range(c.iterations), desc="Iterations", total=c.iterations)
 
+    my_dataset = RLDataset({"xt":torch.tensor([0])})
+
+    training_dataloader = DataLoader(my_dataset, batch_size=c.train_batch_size, shuffle=True, drop_last=False,
+                                     persistent_workers=True, num_workers=4)
+
+    diffusion_rl, optimizer, training_dataloader = accelerator.prepare(diffusion_rl, optimizer, training_dataloader)
+
     # torch.save(diffusion_rl.model.state_dict(), 'RL_Model/checkpoint_' + str(0 + 1) + '.pth')
     for iteration in iter_bar:
 
         train_datasets_rl = generate(diffusion_rl, train_dataloader, iteration, c, device, infos, text_model, smplh,
                                      None)  # , generation_iter
-        train(diffusion_rl, optimizer, train_datasets_rl, iteration, c, infos, device, accelerator=accelerator,
-              old_model=None)
+
+
+        train(diffusion_rl, optimizer, train_datasets_rl, iteration, c, infos, device, accelerator=accelerator, training_dataloader=training_dataloader,      old_model=None)
 
         if (iteration + 1) % c.val_iter == 0:
             avg_reward, avg_tmr, avg_tmr_plus_plus, avg_guo = test(diffusion_rl, val_dataloader, device, infos,
