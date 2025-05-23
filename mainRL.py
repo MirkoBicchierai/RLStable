@@ -217,31 +217,34 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
     return dataset
 
 
-# def get_batch(dataset, i, minibatch_size, infos, diff_step, device):
-#     enc_text = dataset["enc_text"][i: i + minibatch_size].to(device)
-#     mask = dataset["mask"][i: i + minibatch_size].to(device)
-#     lengths = dataset["length"][i: i + minibatch_size].to(device)
-#     r = dataset["r"][i: i + minibatch_size].to(device)
-#     xt_1 = dataset["xt_1"][i: i + minibatch_size].to(device)
-#     xt = dataset["xt"][i: i + minibatch_size].to(device)
-#     t = dataset["t"][i: i + minibatch_size].to(device)
-#     log_like = dataset["log_like"][i: i + minibatch_size].to(device)
-#
-#     return enc_text, mask, lengths, r, xt_1, xt, t, log_like
-#
+def get_batch(dataset, i, minibatch_size, infos, diff_step, device):
+    enc_text = dataset["enc_text"][i: i + minibatch_size].to(device)
+    mask = dataset["mask"][i: i + minibatch_size].to(device)
+    lengths = dataset["length"][i: i + minibatch_size].to(device)
+    r = dataset["r"][i: i + minibatch_size].to(device)
+    xt_1 = dataset["xt_1"][i: i + minibatch_size].to(device)
+    xt = dataset["xt"][i: i + minibatch_size].to(device)
+    t = dataset["t"][i: i + minibatch_size].to(device)
+    log_like = dataset["log_like"][i: i + minibatch_size].to(device)
+    caption = dataset["caption"][i: i + minibatch_size]
+    advantage = dataset["advantage"][i: i + minibatch_size].to(device)
+
+    return enc_text, mask, lengths, r, xt_1, xt, t, log_like, caption, advantage
+
 
 def prepare_dataset(dataset):
     dataset_size = dataset["r"].shape[0]
     shuffle_indices = torch.randperm(dataset_size)
 
     for key in dataset:
-
-        dataset[key] = dataset[key][shuffle_indices]
-
+        if key != "caption":
+            dataset[key] = dataset[key][shuffle_indices]
+        else:
+            dataset[key] = [list(dataset[key])[i] for i in shuffle_indices.numpy()]
     return dataset
 
 
-def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, old_model=None):
+def train(model, optimizer, dataset, iteration, c, infos, device, old_model=None):
     model.model.unet.train()
     model.model.textTransEncoder.train()
     model.model.embed_text.train()
@@ -255,17 +258,17 @@ def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, o
 
     dataset["advantage"] = torch.zeros_like(dataset["r"])
     dataset["advantage"][mask] = (dataset["r"][mask] - mean_r) / (std_r + delta)
-    dataset["advantage"] = (dataset["r"] - mean_r) / (std_r + delta)
+    dataset["advantage"] = (dataset["r"] - mean_r) / (std_r     + delta)
 
     num_minibatches = (dataset["r"].shape[0] + c.train_batch_size - 1) // c.train_batch_size
 
     diff_step = dataset["xt_1"][0].shape[0]
 
-    my_dataset = RLDataset(dataset)
-    dataloader = DataLoader(my_dataset, batch_size=c.train_batch_size, shuffle=True, drop_last=False)
+    # my_dataset = RLDataset(dataset)
+    # dataloader = DataLoader(my_dataset, batch_size=c.train_batch_size, shuffle=True, drop_last=False)
 
-    model, optimizer, training_dataloader, _ = accelerator.prepare(
-        model, optimizer, dataloader, None)
+    # model, optimizer, training_dataloader, _ = accelerator.prepare(
+    #     model, optimizer, dataloader, None)
 
     train_bar = tqdm(range(c.train_epochs), desc=f"Iteration {iteration + 1}/{c.iterations} [Train]", leave=False)
     for e in train_bar:
@@ -275,47 +278,49 @@ def train(model, optimizer, dataset, iteration, c, infos, device, accelerator, o
         epoch_clipped_elements = 0
         epoch_total_elements = 0
 
-        minibatch_bar = tqdm(training_dataloader, leave=False, desc="Minibatch")
-        # dataset = prepare_dataset(dataset)
+        minibatch_bar = tqdm(range(0, dataset["r"].shape[0], c.train_batch_size), leave=False, desc="Minibatch")
+        dataset = prepare_dataset(dataset)
 
-        optimizer.zero_grad()
+        # optimizer.zero_grad()
         for batch_idx, batch in enumerate(minibatch_bar):
             optimizer.zero_grad()
 
-            advantage = batch["advantage"]  # .to(device)
-            enc_text = batch["enc_text"]  # .to(device)
-            caption = batch["caption"]  # .to(device)
-            mask = batch["mask"]  # .to(device)
-            lengths = batch["length"]  # .to(device)
-            xt_1 = batch["xt_1"]  # .to(device)
-            xt = batch["xt"]  # .to(device)
-            log_like = batch["log_like"]  # .to(device)
-            with accelerator.autocast():
-                new_log_like = model.get_loglike_aa(caption, lengths, xt_1, mask[:, 0], xt)  # TODO Check feet bs
+            # advantage = batch["advantage"].to(device)
+            # enc_text = batch["enc_text"].to(device)
+            # caption = batch["caption"].to(device)
+            # mask = batch["mask"].to(device)
+            # lengths = batch["length"].to(device)
+            # xt_1 = batch["xt_1"].to(device)
+            # xt = batch["xt"].to(device)
+            # log_like = batch["log_like"].to(device)
 
-                ratio = torch.exp(new_log_like - log_like)
-                # torch.set_printoptions(precision=4)
+            enc_text, mask, lengths, r, xt_1, xt, t, log_like, caption, advantage = get_batch(dataset, batch, c.train_batch_size, infos, diff_step, device)
 
-                real_adv = advantage[:, -1:]  # r[:,-1:]/10
+            new_log_like = model.get_loglike_aa(caption, lengths, xt_1, mask[:, 0], xt)  # TODO Check feet bs
 
-                # Count how many elements need clipping
-                lower_bound = 1.0 - c.advantage_clip_epsilon
-                upper_bound = 1.0 + c.advantage_clip_epsilon
+            ratio = torch.exp(new_log_like - log_like)
+            # torch.set_printoptions(precision=4)
 
-                too_small = (ratio < lower_bound).sum().item()
-                too_large = (ratio > upper_bound).sum().item()
-                current_clipped = too_small + too_large
-                epoch_clipped_elements += current_clipped
-                current_total = ratio.numel()
-                epoch_total_elements += current_total
+            real_adv = advantage[:, -1:]  # r[:,-1:]/10
 
-                clip_adv = torch.clamp(ratio, lower_bound, upper_bound) * real_adv
-                policy_loss = -torch.min(ratio * real_adv, clip_adv).sum(1).mean()
+            # Count how many elements need clipping
+            lower_bound = 1.0 - c.advantage_clip_epsilon
+            upper_bound = 1.0 + c.advantage_clip_epsilon
 
-                combined_loss = c.alphaL * policy_loss
+            too_small = (ratio < lower_bound).sum().item()
+            too_large = (ratio > upper_bound).sum().item()
+            current_clipped = too_small + too_large
+            epoch_clipped_elements += current_clipped
+            current_total = ratio.numel()
+            epoch_total_elements += current_total
 
-            # combined_loss.backward()
-            accelerator.backward(combined_loss)
+            clip_adv = torch.clamp(ratio, lower_bound, upper_bound) * real_adv
+            policy_loss = -torch.min(ratio * real_adv, clip_adv).sum(1).mean()
+
+            combined_loss = c.alphaL * policy_loss
+
+            combined_loss.backward()
+
             tot_loss += combined_loss.item()
             tot_policy_loss += policy_loss.item()
 
@@ -442,7 +447,7 @@ def main(c: DictConfig):
 
     wandb.init(
         project="TM-BM",
-        name="ROBA A CASO in FP16",
+        name="ROBA A CASO in FP32 FUCK ACCELERATE",
         config=config_dict,
         group="StableMoFusionRL"
     )
@@ -450,9 +455,9 @@ def main(c: DictConfig):
     create_folder_results("ResultRL")
     create_folder_results("RL_Model")
 
-    accelerator = Accelerator() #mixed_precision="fp16"
+    # accelerator = Accelerator() #mixed_precision="fp16"
 
-    device = accelerator.device
+    device = "cuda:0"
 
     # ckpt_path = os.path.join(c.run_dir, c.ckpt_name)
     # print("Loading the checkpoint")
@@ -558,7 +563,7 @@ def main(c: DictConfig):
 
         train_datasets_rl = generate(diffusion_rl, train_dataloader, iteration, c, device, infos, text_model, smplh,
                                      None)  # , generation_iter
-        train(diffusion_rl, optimizer, train_datasets_rl, iteration, c, infos, device, accelerator=accelerator,
+        train(diffusion_rl, optimizer, train_datasets_rl, iteration, c, infos, device,
               old_model=None)
 
         if (iteration + 1) % c.val_iter == 0:
