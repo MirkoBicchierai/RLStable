@@ -439,7 +439,7 @@ def main(c: DictConfig):
 
     wandb.init(
         project="TM-BM",
-        name="ROBA A CASO in FP16",
+        name="ROBA A CASO in FP32 conferma",
         config=config_dict,
         group="StableMoFusionRL"
     )
