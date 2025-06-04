@@ -21,45 +21,29 @@ diffusion:
   denoiser:
     dropout: 0.0
 
-# Pretrained model parameters
-ckpt_name: 'logs/checkpoints/last.ckpt'
-dataset: humanml3d # kitml
-run_dir: pretrained_models/mdm-smpl_clip_smplrifke_humanml3d
-input_type: auto # timeline / text
-single_frame: false # render or not summary frame with smpl
-gender: male
-
-guidance_weight: 1.0
-baseline: none
-
-overlap_s: 0.5
-ckpt: last
-value_from: smpl
-
 
 # General parameters
-num_gen_per_prompt: 2 # 4
-num_prompts_dataset: 16 # 32
+num_gen_per_prompt: 4
+num_prompts_dataset:  128
 num_workers: 6
 
 # Training parameters
-iterations: 3000 #10000
+iterations: 30000
 train_epochs: 3 #4
-train_batch_size: 14
+train_batch_size: 12
 grad_clip: 1.0
 advantage_clip_epsilon: 1e-4
 
 # Reward Model
-reward: "TMR"
-
+reward: "TMR++"
 masking_ratio: 0.75
 reward_scale: 10
 
 # Sequence parameters
 sequence_fixed: false
 fps: 20
-time: 2.5
-joint_stype: "both"  # Can be either "both" or "smpljoints"
+#time: 2.5
+#joint_stype: "both"  # Can be either "both" or "smpljoints"
 
 # Optimizer parameters
 lr: 1e-5
@@ -78,8 +62,6 @@ val_batch_size: 512
 val_num_batch: 0
 render_videos: false
 
-dataset_name: ''
-
 #Layer freeze
 freeze_normalization_layers: true
 
@@ -87,13 +69,28 @@ freeze_normalization_layers: true
 lora: false
 lora_rank: 4
 lora_alpha: 16
-lora_dropout: 0.1
+lora_dropout: 0.0
 lora_bias: "none"
 
 # WanDB parameters
 experiment_name: 'New_'
 group_name: ''
 
+#guidance
+guidance_weight: 1.0
 
-tmr_plus_plus: true
+#generate options
+opt_path: './checkpoints/t2m/t2m_condunet1d_batch64/opt.txt'  # option file path for loading model
+gpu_id: 0  # GPU id
+output_dir: ''  # Directory path to save generation result
+footskate_cleanup: false  # Whether to use footskate cleanup in inference
 
+# inference
+num_inference_steps: 10  # Number of iterative denoising steps during inference
+which_ckpt: 'latest'  # name of checkpoint to load
+diffuser_name: 'ddpm'  # sampler's scheduler class name in the diffuser library
+use_ema: false  # use EMA model in inference
+seed: 0
+
+debug: false
+real_dataset_name: "t2m"

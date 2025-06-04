@@ -3,36 +3,22 @@ import torch
 from colorama import Fore, Style, init
 from TMR.src.guofeats import joints_to_guofeats
 from TMR.src.model.tmr import get_sim_matrix
-from TMR.mtt.load_tmr_model import load_tmr_model_easy
+from TMR.mtt.load_tmr_model import load_tmr_model_easy, easy_forward, load_tmr_model_complete
 from TM2T.load_tm2t_model import load_tm2t_model_easy
 from src.tools.guofeats.motion_representation import guofeats_to_joints
+from MotionCritic.MotionCritic.lib.model.load_critic import load_critic
 
-
-tmr_forward_plus_plus = load_tmr_model_easy(device="cpu", dataset="tmr_humanml3d_kitml_guoh3dfeats")
-tmr_forward = load_tmr_model_easy(device="cpu", dataset="humanml3d")
+from MotionCritic.MotionCritic.parsedata import into_critic
+# todo tenere il modello di reward su gpu (se serve solo mentre lo calcolo)
+tmr_forward_plus_plus_complete = load_tmr_model_complete(device="cpu", dataset="tmr_humanml3d_kitml_guoh3dfeats")
+# tmr_forward_plus_plus = load_tmr_model_easy(device="cpu", dataset="tmr_humanml3d_kitml_guoh3dfeats")
+# tmr_forward = load_tmr_model_easy(device="cpu", dataset="humanml3d")
+tmr_forward_complete = load_tmr_model_complete(device="cpu", dataset="humanml3d")
 guo_forward = load_tm2t_model_easy(device="cpu", dataset="humanml3d") # humanml3d OR humanml3d_kitml_augmented_and_hn OR tmr_humanml3d_kitml_guoh3dfeats
 
 mean_norm = np.load("./checkpoints/t2m/t2m_condunet1d_batch64/meta/" + 'mean.npy')
 std_norm = np.load("./checkpoints/t2m/t2m_condunet1d_batch64/meta/" + 'std.npy')
-
-def smpl_to_guofeats(smpl, smplh):
-    guofeats = []
-    for i in smpl:
-        i_output = extract_joints(
-            i,
-            'smplrifke',
-            fps=20,
-            value_from='smpl',
-            smpl_layer=smplh,
-        )
-        i_joints = i_output["joints"]  # tensor(N, 22, 3)
-        # convert to guofeats, first, make sure to revert the axis, as guofeats have gravity axis in Y
-        x, y, z = i_joints.T
-        i_joints = np.stack((x, z, -y), axis=0).T
-        i_guofeats = joints_to_guofeats(i_joints)
-        guofeats.append(i_guofeats)
-
-    return guofeats
+critic_model = load_critic("./MotionCritic/MotionCritic/pretrained/motioncritic_pre.pth", "cpu")
 
 
 def calc_eval_stats(x_guofeats, forward):
@@ -61,43 +47,36 @@ def print_matrix_nicely(matrix: np.ndarray, mmax=True):
                 line += f"{formatted}  "
         print(line)
 
+#
+# def tmr_metrics(motions_guofeats,real_texts, c):
+#     texts = tmr_forward(real_texts)
+#     x_latents = calc_eval_stats(motions_guofeats, tmr_forward)
+#     sim_matrix = get_sim_matrix(x_latents, texts.detach().cpu().type(x_latents.dtype)).numpy()
+#     sim_matrix = torch.tensor(sim_matrix)
+#     sim_matrix = (sim_matrix + 1) / 2
+#     tmr = sim_matrix.diagonal()
+#
+#     reward = tmr * c.reward_scale
+#
+#     return tmr, reward
+#
+# def tmr_plus_plus_metrics(motions_guofeats,real_texts, c):
+#     texts_plus_plus = tmr_forward_plus_plus(real_texts)
+#     x_latents_plus_plus = calc_eval_stats(motions_guofeats, tmr_forward_plus_plus)
+#
+#     sim_matrix_plus_plus = get_sim_matrix(x_latents_plus_plus,texts_plus_plus.detach().cpu().type(texts_plus_plus.dtype)).numpy()
+#
+#     sim_matrix_plus_plus = torch.tensor(sim_matrix_plus_plus)
+#     sim_matrix_plus_plus = (sim_matrix_plus_plus + 1) / 2
+#     tmr_plus_plus = sim_matrix_plus_plus.diagonal()
+#
+#     reward = tmr_plus_plus * c.reward_scale
+#
+#     return tmr_plus_plus, reward
 
-def only_tmr_plus_plus(sequences, infos, smplh, real_texts, all_embedding_tmr, c):
-    texts_plus_plus = tmr_forward_plus_plus(real_texts)
-
-    motions = []
-    for idx in range(sequences.shape[0]):
-        x_start = sequences[idx]
-        length = infos["all_lengths"][idx].item()
-        x_start = x_start[:length]
-        motions.append(x_start.detach().cpu())
-
-    motions_guofeats = smpl_to_guofeats(motions, smplh=smplh)
-
-    x_latents_plus_plus = calc_eval_stats(motions_guofeats, tmr_forward_plus_plus)
-    sim_matrix_plus_plus = get_sim_matrix(x_latents_plus_plus, texts_plus_plus.detach().cpu().type(x_latents_plus_plus.dtype)).numpy()
-
-    sim_matrix_plus_plus = torch.tensor(sim_matrix_plus_plus)
-    sim_matrix_plus_plus = (sim_matrix_plus_plus + 1) / 2
-    tmr_plus_plus = sim_matrix_plus_plus.diagonal()
-
-    return tmr_plus_plus
-
-def tmr_metrics(motions_guofeats,real_texts, c):
-    texts = tmr_forward(real_texts)
-    x_latents = calc_eval_stats(motions_guofeats, tmr_forward)
-    sim_matrix = get_sim_matrix(x_latents, texts.detach().cpu().type(x_latents.dtype)).numpy()
-    sim_matrix = torch.tensor(sim_matrix)
-    sim_matrix = (sim_matrix + 1) / 2
-    tmr = sim_matrix.diagonal()
-
-    reward = tmr * c.reward_scale
-
-    return tmr, reward
-
-def tmr_plus_plus_metrics(motions_guofeats,real_texts, c):
-    texts_plus_plus = tmr_forward_plus_plus(real_texts)
-    x_latents_plus_plus = calc_eval_stats(motions_guofeats, tmr_forward_plus_plus)
+def metric_fast(model, motions_guofeats,real_texts, c):
+    texts_plus_plus = easy_forward(*model, motions_or_texts=real_texts, device="cuda:0")
+    x_latents_plus_plus = easy_forward(*model, motions_or_texts=motions_guofeats, device="cuda:0")
 
     sim_matrix_plus_plus = get_sim_matrix(x_latents_plus_plus,texts_plus_plus.detach().cpu().type(texts_plus_plus.dtype)).numpy()
 
@@ -138,22 +117,23 @@ def reward_model(sequences, infos, smplh, real_texts, c):
 
     motions_guofeats = get_motion_guofeats(sequences, infos, smplh)
 
-    reward = stillness_reward(motions_guofeats, infos, None)
-    metrics = {
-            "tmr": reward,
-            "reward": reward
-        }
-    return metrics
+    # reward = stillness_reward(motions_guofeats, infos, None)
+    # metrics = {
+    #         "tmr": reward,
+    #         "reward": reward
+    #     }
+    # return metrics
 
     if c.reward == "TMR":
-        tmr, reward = tmr_metrics(motions_guofeats,real_texts, c)
+        tmr, reward = metric_fast(tmr_forward_complete,motions_guofeats,real_texts, c)
         metrics = {
             "tmr": tmr,
             "reward": reward
         }
 
+
     if c.reward == "TMR++":
-        tmr_plus_plus, reward = tmr_plus_plus_metrics(motions_guofeats,real_texts, c)
+        tmr_plus_plus, reward = metric_fast(tmr_forward_plus_plus_complete,motions_guofeats,real_texts, c)
         metrics = {
             "tmr++": tmr_plus_plus,
             "reward" : reward
@@ -166,6 +146,17 @@ def reward_model(sequences, infos, smplh, real_texts, c):
             "reward": reward
         }
 
+
+    if c.reward == "motionCritic":
+
+        pass
+        # joints = guofeats_to_rot6d(motions_guofeats[0])
+        # joints = into_critic(joints)
+        # reward = critic_model.module.batch_critic(joints)
+        # metrics = {
+        #     "reward": reward
+        # }
+
     return metrics
 
 def all_metrics(sequences, infos, smplh, real_texts, c):
@@ -173,8 +164,8 @@ def all_metrics(sequences, infos, smplh, real_texts, c):
     motions_guofeats = get_motion_guofeats(sequences, infos, smplh)
 
     guo_et_al, _  = guo_metrics(motions_guofeats, real_texts, c)
-    tmr_plus_plus, _ = tmr_plus_plus_metrics(motions_guofeats, real_texts, c)
-    tmr, _ = tmr_metrics(motions_guofeats, real_texts, c)
+    tmr_plus_plus, _ = metric_fast(tmr_forward_plus_plus_complete,motions_guofeats,real_texts, c)
+    tmr, _ = metric_fast(tmr_forward_complete,motions_guofeats,real_texts, c)
 
     metrics = {
         "tmr": tmr,
@@ -233,34 +224,6 @@ def euclidean_distance_matrix(matrix1, matrix2):
     d3 = np.sum(np.square(matrix2), axis=1)     # shape (num_train, )
     dists = np.sqrt(d1 + d2 + d3)  # broadcasting
     return dists
-
-
-def guo_reward(sequences, infos, smplh, real_texts, all_embedding_tmr, c):
-
-    motions = []
-    for idx in range(sequences.shape[0]):
-        x_start = sequences[idx]
-        length = infos["all_lengths"][idx].item()
-        x_start = x_start[:length]
-        motions.append(x_start.detach().cpu())
-
-    motions_guofeats = smpl_to_guofeats(motions, smplh=smplh)
-    motions_latents, texts_latents = guo_forward(motions=motions_guofeats, texts=real_texts)
-
-    sim_matrix = euclidean_distance_matrix(motions_latents.cpu().numpy(), texts_latents.cpu().numpy())
-    # print_matrix_nicely(sim_matrix, mmax=False)
-
-    sim_matrix = torch.tensor(sim_matrix)
-    # Normalization (not needed but I wanted):
-    # the Trace of the matrix is between [0, inf], so I multiply it by (-1) and add 1, Now is between [-inf, 1]. I divide by 10 for better visualization.
-    guo = (sim_matrix.diagonal() * (-1) + 1) / 10 
-
-    metrics = {
-        "guo": guo,
-        "reward": guo * c.reward_scale
-    }
-
-    return metrics
 
 
 def collate_tensor_with_padding(batch):

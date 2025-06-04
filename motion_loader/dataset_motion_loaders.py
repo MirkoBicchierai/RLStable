@@ -10,11 +10,11 @@ def get_dataset_loader(opt, batch_size, mode='eval',split='test', accelerator=No
     if mode in ['eval','gt_eval']:
         dataloader = DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle,
-            num_workers=4, drop_last=True, collate_fn=collate_fn
+            num_workers=4, drop_last=False, collate_fn=collate_fn
         ) 
     else:
         dataloader = DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle,
-            num_workers=4, drop_last=True,persistent_workers=True
+            num_workers=4, drop_last=False,persistent_workers=True
         )
     return dataloader

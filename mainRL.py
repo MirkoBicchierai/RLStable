@@ -1,33 +1,28 @@
 import itertools
 import os
+import time
+
 import hydra
 import numpy as np
 import torch
-from accelerate import Accelerator
 from hydra.utils import instantiate
-from matplotlib.pyplot import title
 from omegaconf import DictConfig, OmegaConf
-from torch import nn
-
 from RL.reward_model import all_metrics, reward_model, get_motion_guofeats
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 from tqdm import tqdm
 from accelerate.utils import set_seed
 from os.path import join as pjoin
-
 from models import build_models
 from models.gaussian_diffusion import DiffusePipeline, length_to_mask, masked
 from motion_loader import get_dataset_loader
-from options.evaluate_options import TestOptions
-from options.generate_options import GenerateOptions
-from src.config import read_config
-# from src.model.text_encoder import TextToEmb
+from options.get_opt import get_opt
 import wandb
-from peft import LoraModel, LoraConfig, TaskType, get_peft_model
-
+from peft import  LoraConfig,  get_peft_model
 from RL.utils import render, get_embeddings, get_embeddings_2, freeze_normalization_layers, create_folder_results
 from src.tools.extract_joints import extract_joints
 from utils.model_load import load_model_weights
+from box import Box
+
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["PYOPENGL_PLATFORM"] = "egl"
@@ -213,7 +208,9 @@ def generate(model, train_dataloader, iteration, c, device, infos, text_model, s
         try:
             dataset[key] = torch.cat(dataset[key], dim=0)
         except:
-            print(key)
+            pass
+
+    torch.cuda.empty_cache()
     return dataset
 
 
@@ -264,12 +261,6 @@ def train(model, optimizer, dataset, iteration, c, infos, device, old_model=None
 
     diff_step = dataset["xt_1"][0].shape[0]
 
-    # my_dataset = RLDataset(dataset)
-    # dataloader = DataLoader(my_dataset, batch_size=c.train_batch_size, shuffle=True, drop_last=False)
-
-    # model, optimizer, training_dataloader, _ = accelerator.prepare(
-    #     model, optimizer, dataloader, None)
-
     train_bar = tqdm(range(c.train_epochs), desc=f"Iteration {iteration + 1}/{c.iterations} [Train]", leave=False)
     for e in train_bar:
         tot_loss = 0
@@ -285,18 +276,9 @@ def train(model, optimizer, dataset, iteration, c, infos, device, old_model=None
         for batch_idx, batch in enumerate(minibatch_bar):
             optimizer.zero_grad()
 
-            # advantage = batch["advantage"].to(device)
-            # enc_text = batch["enc_text"].to(device)
-            # caption = batch["caption"].to(device)
-            # mask = batch["mask"].to(device)
-            # lengths = batch["length"].to(device)
-            # xt_1 = batch["xt_1"].to(device)
-            # xt = batch["xt"].to(device)
-            # log_like = batch["log_like"].to(device)
-
             enc_text, mask, lengths, r, xt_1, xt, t, log_like, caption, advantage = get_batch(dataset, batch, c.train_batch_size, infos, diff_step, device)
 
-            new_log_like = model.get_loglike_aa(caption, lengths, xt_1, mask[:, 0], xt)  # TODO Check feet bs
+            new_log_like = model.get_loglike(caption, lengths, xt_1, mask[:, 0], xt)  # TODO Check feet bs
 
             ratio = torch.exp(new_log_like - log_like)
             # torch.set_printoptions(precision=4)
@@ -435,7 +417,7 @@ def test(model, dataloader, device, infos, text_model, smplh, joints_renderer, s
     avg_tmr_plus_plus = total_tmr_plus_plus / batch_count_tmr_plus_plus
     avg_guo = total_tmr_guo / batch_count_guo
 
-    print(avg_reward, avg_tmr, avg_tmr_plus_plus, avg_guo)
+    torch.cuda.empty_cache()
 
     return avg_reward, avg_tmr, avg_tmr_plus_plus, avg_guo
 
@@ -443,32 +425,26 @@ def test(model, dataloader, device, infos, text_model, smplh, joints_renderer, s
 @hydra.main(config_path="config", config_name="TrainRL", version_base="1.3")
 def main(c: DictConfig):
     config_dict = OmegaConf.to_container(c, resolve=True)
-    wandb.login(key="686f740320175b422861147930c51baba0e47fe6")
+    wandb.login(key="07f36bb917c2bd9f84f0dc922a2548a9249b57aa")
 
     wandb.init(
-        project="TM-BM",
-        name="ROBA A CASO in FP32 FUCK ACCELERATE",
+        project="MotionDPPO",
+        name=c.experiment_name,
         config=config_dict,
-        group="StableMoFusionRL"
+        group=c.group_name,
+        mode='disabled' if c.debug else 'online'
     )
-
-    create_folder_results("ResultRL")
-    create_folder_results("RL_Model")
-
-    # accelerator = Accelerator() #mixed_precision="fp16"
+    folder_results = "Results/"+c.experiment_name.replace(' ', '_')
+    folder_models = "Models/"+c.experiment_name.replace(' ', '_')
+    create_folder_results(folder_results)
+    create_folder_results(folder_models)
+    os.makedirs(folder_results+"/VAL/", exist_ok=True)
 
     device = "cuda:0"
 
-    # ckpt_path = os.path.join(c.run_dir, c.ckpt_name)
-    # print("Loading the checkpoint")
-    # ckpt = torch.load(str(ckpt_path), map_location=device)
-    #
-    # joints_renderer = instantiate(c.joints_renderer)
-    # smpl_renderer = instantiate(c.smpl_renderer)
-
-    parser = GenerateOptions()
-    # parser = TestOptions()
-    opt = parser.parse()
+    opt = Box(**config_dict)
+    opt_path = opt.opt_path #TODO da cambiare se usiamo KIT
+    get_opt(opt, opt_path)
 
     set_seed(opt.seed)
     opt.device = device
@@ -476,7 +452,7 @@ def main(c: DictConfig):
     print("Loading the models")
     model = build_models(opt)
     ckpt_path = pjoin(opt.model_dir, opt.which_ckpt + '.tar')
-    niter = load_model_weights(model, ckpt_path, use_ema=False, device=device)
+    load_model_weights(model, ckpt_path, use_ema=c.use_ema, device=device)
 
     # Create a pipeline for generation in diffusion model framework
     diffusion_rl = DiffusePipeline(
@@ -487,31 +463,36 @@ def main(c: DictConfig):
         num_inference_steps=opt.num_inference_steps,
         torch_dtype=torch.float32,
     )
+    if c.guidance_weight == 1.0:
+        diffusion_rl.model.cond_mask_prob = 0.0
+    else:
+        diffusion_rl.model.guidance_weight = c.guidance_weight
 
-    diffusion_rl.model.cond_mask_prob = 0.0  # todo remvoe
-    #
-    # for p in diffusion_rl.model.parameters():
-    #     p.requires_grad = False
+    if c.freeze_normalization_layers:
+        freeze_normalization_layers(diffusion_rl)
 
-    freeze_normalization_layers(diffusion_rl)
+    if c.lora:
 
-    # lora_config = LoraConfig(
-    #     # task_type=TaskType.UNET,  # we’re adapting a diffusion UNet
-    #     inference_mode=False,  # fine-tuning, not just inference
-    #     r=8,  # LoRA rank
-    #     lora_alpha=16,  # LoRA scaling
-    #     lora_dropout=0.0,  # dropout on LoRA layers
-    #     bias="none",  # no bias adapters
-    #     # target all the cross-attention Q/K/V projections
-    #     target_modules=["query", "key", "value", "embed_text"
-    #                     "textTransEncoder.layers.0.self_attn.out_proj",
-    #                     "textTransEncoder.layers.1.self_attn.out_proj",
-    #                     "textTransEncoder.layers.2.self_attn.out_proj",
-    #                     "textTransEncoder.layers.3.self_attn.out_proj",
-    #                     ],
-    # )
-    #
-    # diffusion_rl.model.unet = get_peft_model(diffusion_rl.model.unet, lora_config)
+        for p in diffusion_rl.model.parameters():
+            p.requires_grad = False
+
+        lora_config = LoraConfig(
+            # task_type=TaskType.UNET,  # we’re adapting a diffusion UNet
+            inference_mode=False,  # fine-tuning, not just inference
+            r=c.lora_rank,  # LoRA rank
+            lora_alpha=c.lora_alpha,  # LoRA scaling
+            lora_dropout=c.lora_dropout,  # dropout on LoRA layers
+            bias=c.lora_bias,  # no bias adapters
+            # target all the cross-attention Q/K/V projections
+            target_modules=["query", "key", "value", "embed_text"
+                            "textTransEncoder.layers.0.self_attn.out_proj",
+                            "textTransEncoder.layers.1.self_attn.out_proj",
+                            "textTransEncoder.layers.2.self_attn.out_proj",
+                            "textTransEncoder.layers.3.self_attn.out_proj",
+                            ],
+        )
+
+        diffusion_rl.model.unet = get_peft_model(diffusion_rl.model.unet, lora_config)
 
     total_trainable_params = sum(p.numel() for p in diffusion_rl.model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {total_trainable_params:,}")
@@ -531,8 +512,10 @@ def main(c: DictConfig):
 
     smplh = None  # we do need conversion for thsi model, it works in guofeats
 
-    train_dataloader = get_dataset_loader(opt, opt.batch_size, mode='hml_gt', split='easy_val')
-    val_dataloader = get_dataset_loader(opt, opt.batch_size, mode='hml_gt', split='easy_test', shuffle=False)
+    opt.dataset_name = opt.real_dataset_name
+    train_dataloader = get_dataset_loader(opt, c.num_prompts_dataset, mode='hml_gt', split='train')
+    print(opt.dataset_name)
+    val_dataloader = get_dataset_loader(opt, c.val_batch_size, mode='hml_gt', split='test', shuffle=False)
 
     infos = {
         "featsname": None,  # cfg.motion_features,
@@ -543,47 +526,56 @@ def main(c: DictConfig):
     if c.sequence_fixed:
         infos["all_lengths"] = torch.tensor(np.full(2048, int(c.time * c.fps))).to(device)
 
-    file_path = "../ResultRL/VAL/"
-    os.makedirs(file_path, exist_ok=True)
+
 
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, diffusion_rl.model.parameters()), lr=c.lr,
                                   betas=(c.beta1, c.beta2), eps=c.eps,
                                   weight_decay=c.weight_decay)
-
-    avg_reward, avg_tmr, avg_tmr_plus_plus, avg_guo = test(diffusion_rl, val_dataloader, device, infos, text_model,
-                                                           smplh, joints_renderer, None, c, None,
-                                                           path="ResultRL/VAL/OLD/")
-    wandb.log({"Validation": {"Reward": avg_reward, "TMR": avg_tmr, "TMR++": avg_tmr_plus_plus, "Guo": avg_guo,
-                              "iterations": 0}})
+    if not c.debug:
+        avg_reward, avg_tmr, avg_tmr_plus_plus, avg_guo = test(diffusion_rl, val_dataloader, device, infos, text_model,
+                                                               smplh, joints_renderer, None, c, None,
+                                                               path=folder_results+"/VAL/OLD/")
+        wandb.log({"Validation": {"Reward": avg_reward, "TMR": avg_tmr, "TMR++": avg_tmr_plus_plus, "Guo": avg_guo,
+                                  "iterations": 0}})
 
     iter_bar = tqdm(range(c.iterations), desc="Iterations", total=c.iterations)
+    best = 100
 
-    # torch.save(diffusion_rl.model.state_dict(), 'RL_Model/checkpoint_' + str(0 + 1) + '.pth')
     for iteration in iter_bar:
-
+        # strat_time = time.time()
         train_datasets_rl = generate(diffusion_rl, train_dataloader, iteration, c, device, infos, text_model, smplh,
                                      None)  # , generation_iter
+        # end_time = time.time()
+        # print("Generate time:", end_time - strat_time)
+        #
+        # strat_time = time.time()
         train(diffusion_rl, optimizer, train_datasets_rl, iteration, c, infos, device,
               old_model=None)
+        # end_time = time.time()
+        # print("Train time:", end_time - strat_time)
 
         if (iteration + 1) % c.val_iter == 0:
             avg_reward, avg_tmr, avg_tmr_plus_plus, avg_guo = test(diffusion_rl, val_dataloader, device, infos,
                                                                    text_model, smplh, joints_renderer,
                                                                    None, c, None,
-                                                                   path="ResultRL/VAL/" + str(iteration + 1) + "/")
+                                                                   path=folder_results+"/VAL/" + str(iteration + 1) + "/")
             wandb.log({"Validation": {"Reward": avg_reward, "TMR": avg_tmr, "TMR++": avg_tmr_plus_plus, "Guo": avg_guo,
                                       "iterations": iteration + 1}})
-            # torch.save(diffusion_rl.model.state_dict(), 'RL_Model/checkpoint_' + str(iteration + 1) + '.pth')
-            iter_bar.set_postfix(val_tmr=f"{avg_tmr:.4f}")
 
-    # file_path = "ResultRL/TEST/"
+            iter_bar.set_postfix(val_tmr=f"{avg_tmr:.4f}")
+            if avg_guo < best:
+                best = avg_guo
+                torch.save(diffusion_rl.model.state_dict(), folder_models+'/checkpoint_best.pth')
+                print('saving model ', iteration)
+
+    # file_path = "ResultRL_2/TEST/"
     # os.makedirs(file_path, exist_ok=True)
     # avg_reward, avg_tmr, avg_tmr_plus_plus, avg_guo = test(diffusion_rl, test_dataloader, device, infos, text_model,
     #                                                       smplh, joints_renderer,
-    #                                                       smpl_renderer, c, test_embedding_tmr, path="ResultRL/TEST/")
+    #                                                       smpl_renderer, c, test_embedding_tmr, path="ResultRL_2/TEST/")
     # wandb.log({"Test": {"Reward": avg_reward, "TMR": avg_tmr, "TMR++": avg_tmr_plus_plus, "Guo": avg_guo}})
 
-    torch.save(diffusion_rl.model.state_dict(), 'RL_Model/model_final.pth')
+    torch.save(diffusion_rl.model.state_dict(), folder_models+'/model_final.pth')
 
 
 if __name__ == "__main__":

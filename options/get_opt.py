@@ -26,7 +26,8 @@ def is_number(numStr):
     return flag
   
 def get_opt(opt, opt_path):
-    opt_dict = vars(opt)
+    # opt_dict = vars(opt)
+    opt_dict = opt
 
     skip = ('-------------- End ----------------',
             '------------ Options -------------',

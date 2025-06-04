@@ -227,7 +227,7 @@ class Text2MotionDataset(data.Dataset):
         # text_data = random.choice(text_list) #MMMMMM
         caption = text_list[0]['caption']
 
-        return caption, torch.tensor(0), 50# m_length
+        return caption, torch.tensor(0), m_length
 
 
 class HumanML3D(Text2MotionDataset):

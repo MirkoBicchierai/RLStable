@@ -160,7 +160,7 @@ class DiffusePipeline(object):
             # 1. model predict 
             with torch.no_grad():
                 if getattr(self.model, 'cond_mask_prob', 0) > 0:
-                    predict = self.model.forward_with_cfg(sample, t, enc_text=enc_text)
+                    predict = self.model.forward_with_cfg(sample, t, enc_text=enc_text, cfg_scale=getattr(self.model, 'guidance_weight', 0))
                 else:
 
                     predict = self.model(sample, t, enc_text=enc_text)
@@ -193,7 +193,7 @@ class DiffusePipeline(object):
             # 1. model predict
             with torch.no_grad():
                 if getattr(self.model, 'cond_mask_prob', 0) > 0:
-                    predict = self.model.forward_with_cfg(sample, t, enc_text=enc_text)
+                    predict = self.model.forward_with_cfg(sample, t, enc_text=enc_text, cfg_scale=getattr(self.model, 'guidance_weight', 0))
                 else:
                     predict = self.model(sample, t, enc_text=enc_text)
             # mean, std = get_parameters(self.scheduler, t[0], predict, sample)
@@ -228,39 +228,7 @@ class DiffusePipeline(object):
 
         return sample, results
 
-    def get_loglike(self, enc_text, m_lens, actions, mask, state):
-        B = enc_text.shape[0]
-        T = m_lens.max()
-        shape = (B, T, self.model.input_feats)
-
-        # set timesteps
-        self.scheduler.set_timesteps(self.num_inference_steps, self.device)
-        timesteps = [torch.tensor([t] * B, device=self.device).long() for t in self.scheduler.timesteps]
-        log_prob = []
-        for i, t in enumerate(timesteps):
-            sample = state[:, i]
-            # 1. model predict
-            if getattr(self.model, 'cond_mask_prob', 0) > 0:
-                predict = self.model.forward_with_cfg(sample, t, enc_text=enc_text)
-            else:
-                predict = self.model(sample, t, enc_text=enc_text)
-
-            old_sample = sample.clone()
-
-            # 2. compute less noisy motion and set x_t -> x_t-1
-            sus = self.scheduler.step(predict, t[0], sample, action=actions[:, i])
-
-            sample = sus.prev_sample
-
-            # log_likelihood = compute_log_likelihood(sample, mean, std)
-            log_likelihood = nan_masked(sus.log_prob, mask)
-            log_prob_ = log_likelihood.nanmean(dim=[1, 2])
-            log_prob.append(log_prob_.unsqueeze(-1))
-            # log_prob.append(log_likelihood.nanmean(dim=[1, 2]).unsqueeze(-1))
-
-        return torch.cat(log_prob, dim=1)
-
-    def get_loglike_aa(self, caption, m_lens, actions, mask, state):
+    def get_loglike(self, caption, m_lens, actions, mask, state):
 
         enc_text = self.model.encode_text(caption, self.device)
         B = enc_text.shape[0]
@@ -278,17 +246,17 @@ class DiffusePipeline(object):
 
         timesteps = timesteps.reshape(B * self.num_inference_steps)
         enc_text = enc_text.reshape(B * self.num_inference_steps, enc_text.shape[-2], enc_text.shape[-1])
-        state = state.reshape(B * self.num_inference_steps, T, state.shape[-1])
-
+        state = state.reshape(B * self.num_inference_steps, state.shape[-2], state.shape[-1])
+        
         # model forward for all timesteps at once
         if getattr(self.model, 'cond_mask_prob', 0) > 0:
-            predict = self.model.forward_with_cfg(state, timesteps, enc_text=enc_text)
+            predict = self.model.forward_with_cfg(state, timesteps, enc_text=enc_text, cfg_scale=getattr(self.model, 'guidance_weight', 0))
         else:
             predict = self.model(state, timesteps, enc_text=enc_text)
 
         timesteps = timesteps.reshape(B, self.num_inference_steps)
-        state = state.reshape(B, self.num_inference_steps, T, state.shape[-1])
-        predict = predict.reshape(B, self.num_inference_steps, T, state.shape[-1])
+        state = state.reshape(B, self.num_inference_steps, state.shape[-2], state.shape[-1])
+        predict = predict.reshape(B, self.num_inference_steps, state.shape[-2], state.shape[-1])
 
         log_prob = []
         for t in range(self.num_inference_steps):

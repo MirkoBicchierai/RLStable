@@ -13,7 +13,7 @@ class GenerateOptions():
         self.parser.add_argument("--footskate_cleanup", action="store_true", help='Where use footskate cleanup in inference')
         
         # inference
-        self.parser.add_argument("--num_inference_steps", type=int, default=20, help='Number of iterative denoising steps during inference.')
+        self.parser.add_argument("--num_inference_steps", type=int, default=10, help='Number of iterative denoising steps during inference.')
         self.parser.add_argument("--which_ckpt", type=str, default='latest', help='name of checkpoint to load')
         self.parser.add_argument("--diffuser_name", type=str, default='ddpm', help='sampler\'s scheduler class name in the diffuser library')
         self.parser.add_argument("--no_ema", action="store_true", help='Where use EMA model in inference')
@@ -35,8 +35,9 @@ class GenerateOptions():
 
 
 
-    def parse(self):
-        self.opt = self.parser.parse_args()
+    def parse(self, values):
+        # self.opt = self.parser.parse_args()
+        self.opt = values
         opt_path = self.opt.opt_path
         get_opt(self.opt, opt_path)
         return self.opt
