@@ -1,2 +1,0 @@
-
-CUDA_VISIBLE_DEVICES=0 python mainRL.py group_name=StableMoFusion_FullData experiment_name=10Step_Guidance_Full_128x4 lora=False guidance_weight=2.5 train_batch_size=18
